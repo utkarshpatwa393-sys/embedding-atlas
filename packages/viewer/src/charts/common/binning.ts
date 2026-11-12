@@ -15,6 +15,11 @@ export interface Binning {
   rangeForIndex: (index: number) => [number, number];
 }
 
+function expandConstantDomain(value: number): [number, number] {
+  let halfSpan = value === 0 || !Number.isFinite(value) ? 0.5 : Math.abs(value) * 0.1;
+  return [value - halfSpan, value + halfSpan];
+}
+
 function roundToNearest(value: number, array: number[]): number {
   let minV = value;
   let minD = Infinity;
@@ -63,12 +68,17 @@ export function inferBinning(
 
   switch (scaleType) {
     case "linear": {
-      let s = d3.scaleLinear().domain([min, max]).nice(desiredCount);
+      let [d0, d1] = min === max ? expandConstantDomain(min) : [min, max];
+      let s = d3.scaleLinear().domain([d0, d1]).nice(desiredCount);
       let ticks = s.ticks(desiredCount);
-      let binStart = s.domain()[0];
-      let binSize = ticks[1] - ticks[0];
+      let domain = s.domain() as [number, number];
+      let binStart = domain[0];
+      let binSize = ticks.length >= 2 ? ticks[1] - ticks[0] : (domain[1] - domain[0]) / Math.max(desiredCount, 1);
+      if (!(binSize > 0)) {
+        binSize = 1;
+      }
       return {
-        scale: { type: "linear", domain: s.domain() as any },
+        scale: { type: "linear", domain },
         binIndexExpr: (x) =>
           SQL.cond(
             SQL.isFinite(x), // Ensure finite value
@@ -81,9 +91,10 @@ export function inferBinning(
       };
     }
     case "log": {
-      let s = d3.scaleLog().domain([min, max]).nice();
+      let [d0, d1] = min === max ? [min * 0.5, max * 2] : [min, max];
+      let s = d3.scaleLog().domain([d0, d1]).nice();
       let binStart = Math.log10(s.domain()[0]);
-      let binSize = (Math.log10(s.domain()[1]) - binStart) / desiredCount;
+      let binSize = (Math.log10(s.domain()[1]) - binStart) / Math.max(desiredCount, 1);
       binSize = roundToNearest(binSize, [0.05, 0.1, 0.2, 0.5, 1, 1.5, 2]);
       return {
         scale: { type: "log", domain: s.domain() as any },
@@ -102,16 +113,20 @@ export function inferBinning(
       };
     }
     case "symlog": {
-      let absMax = Math.max(Math.abs(min), Math.abs(max));
+      let [d0, d1] = min === max ? expandConstantDomain(min) : [min, max];
+      let absMax = Math.max(Math.abs(d0), Math.abs(d1));
       let constant = absMax >= 100 ? 1 : absMax > 0 ? absMax / 1e5 : 1;
       let forward = (x: number) => Math.sign(x) * Math.log1p(Math.abs(x) / constant);
       let reverse = (x: number) => Math.sign(x) * Math.expm1(Math.abs(x)) * constant;
-      let sMin = forward(min);
-      let sMax = forward(max);
+      let sMin = forward(d0);
+      let sMax = forward(d1);
       let binStart = sMin;
-      let binSize = (sMax - sMin) / desiredCount;
+      let binSize = (sMax - sMin) / Math.max(desiredCount, 1);
+      if (!(binSize > 0)) {
+        binSize = 1;
+      }
       return {
-        scale: { type: "symlog", constant: constant, domain: [min, max] },
+        scale: { type: "symlog", constant: constant, domain: [d0, d1] },
         binIndexExpr: (x) =>
           SQL.cond(
             SQL.isFinite(x), // Ensure finite value
@@ -232,6 +247,9 @@ export function inferTimeBinning(
       let stepMs = stepValue;
       let origin = Math.floor(min / stepMs) * stepMs;
       let domainEnd = Math.ceil(max / stepMs) * stepMs;
+      if (domainEnd <= origin) {
+        domainEnd = origin + stepMs;
+      }
       return {
         scale: { type: "time", domain: [origin, domainEnd] },
         binIndexExpr: (x) =>
